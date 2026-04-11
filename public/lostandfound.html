@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DKUT Lost & Found ID Lookup</title>
+  <link rel="stylesheet" href="styles-lost.css">
+</head>
+<body>
+  <header>
+    <div class="header-inner">
+      <div class="brand">
+        <svg width="36" height="36" viewBox="0 0 36 36" fill="none">
+          <rect width="36" height="36" rx="8" fill="#1a6b3c"/>
+          <path d="M10 18h16M10 12h16M10 24h10" stroke="#fff" stroke-width="2.2" stroke-linecap="round"/>
+        </svg>
+        <div>
+          <h1>Lost & Found ID Lookup</h1>
+          <span>Dedan Kimathi University of Technology</span>
+        </div>
+      </div>
+      <div class="nav-links">
+        <a href="/">← Back to Fee Structures</a>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <div class="search-card">
+      <h2>Search for a Lost Student ID</h2>
+      <p>Enter the full registration number (e.g., E022-01-1114/2024)</p>
+      <div class="search-form">
+        <input type="text" id="regInput" placeholder="Registration number..." value="">
+        <button id="searchBtn">Search</button>
+      </div>
+      <div id="searchError" class="error-message hidden"></div>
+    </div>
+
+    <div id="status" class="status hidden">
+      <div class="spinner"></div>
+      <p>Searching portal...</p>
+    </div>
+
+    <div id="resultsContainer" class="hidden">
+      <div class="results-header">
+        <h3>Found Items</h3>
+        <span id="resultCount"></span>
+      </div>
+      <div class="table-responsive">
+        <table id="resultsTable">
+          <thead>
+            <tr>
+              <th>Item Type</th>
+              <th>Name</th>
+              <th>Description</th>
+              <th>Reg Number</th>
+              <th>Date Uploaded</th>
+              <th>View</th>
+            </tr>
+          </thead>
+          <tbody id="resultsBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div id="noResults" class="no-results hidden">
+      <p>No lost items found for this registration number.</p>
+    </div>
+  </main>
+
+  <footer>
+    <p>⚠️ Unofficial resource. Always verify with the official <a href="https://portal.dkut.ac.ke" target="_blank">DKUT portal</a>.</p>
+  </footer>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="script-lost.js"></script>
+</body>
+</html>
