@@ -1,170 +1,257 @@
-export default async function handler(req, res) {
-  try {
-    const { filename, type } = req.query;
+const axios = require('axios');
+const cheerio = require('cheerio');
 
-    const url = `https://portal.dkut.ac.ke/student/downloadfeestructure?filename=${encodeURIComponent(filename)}&type=${encodeURIComponent(type)}`;
+const DKUT_EMAIL    = process.env.DKUT_EMAIL    || 'nyaga.njogu23@students.dkut.ac.ke';
+const DKUT_PASSWORD = process.env.DKUT_PASSWORD || '0711660741@Aa';
+const BASE_URL      = 'https://portal.dkut.ac.ke';
+const SESSION_TTL   = 25 * 60 * 1000;            // 25 minutes
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36 OPR/129.0.0.0';
 
-    const response = await fetch(url, {
-      headers: {
-        "Cookie": process.env.DKUT_COOKIE,
-        "User-Agent": "Mozilla/5.0",
-        "Referer": "https://portal.dkut.ac.ke/student/"
-      }
-    });// Vercel Serverless Function
+let sessionCookies   = null;
+let sessionTimestamp = 0;
+let cachedFeeList    = null;                     // { total, categories, urlMap }
 
-let session = {
-  cookie: null,
-  lastLogin: 0,
-};
-
-// helper: extract cookies cleanly
-function extractCookies(setCookieHeader) {
-  if (!setCookieHeader) return "";
-  return setCookieHeader
-    .split(",")
-    .map(c => c.split(";")[0])
-    .join("; ");
+// ── Cookie helpers ───────────────────────────────────────────────────────────
+function parseCookies(headers) {
+    const map = {};
+    (headers['set-cookie'] || []).forEach(line => {
+        const [pair] = line.split(';');
+        const eq = pair.indexOf('=');
+        if (eq > 0) map[pair.slice(0, eq).trim()] = pair.slice(eq + 1).trim();
+    });
+    return map;
+}
+function serialize(map) {
+    return Object.entries(map).map(([k, v]) => `${k}=${v}`).join('; ');
 }
 
-// STEP 1: get login page (for CSRF + initial cookies)
-async function getLoginPage() {
-  const res = await fetch("https://portal.dkut.ac.ke/", {
-    headers: {
-      "User-Agent": "Mozilla/5.0",
-    },
-  });
+// ── Login (uses /site/index, the real login page) ───────────────────────────
+async function login(email, password) {
+    let cookies = {};
 
-  const html = await res.text();
-  const cookies = extractCookies(res.headers.get("set-cookie"));
+    // 1. GET the login page (homepage with form)
+    const home = await axios.get(`${BASE_URL}/site/index`, {
+        headers: { 'User-Agent': UA },
+        maxRedirects: 5,
+        validateStatus: () => true
+    });
+    cookies = { ...cookies, ...parseCookies(home.headers) };
 
-  // try to extract CSRF token (common patterns)
-  const tokenMatch =
-    html.match(/name="_token"\s+value="([^"]+)"/) ||
-    html.match(/name="csrf_token"\s+value="([^"]+)"/);
+    const $ = cheerio.load(home.data);
+    // CSRF token can be in meta tag or inside the form
+    const csrf = $('meta[name="csrf-token"]').attr('content') ||
+                 $('input[name="_csrf"]').val();
+    if (!csrf) return { success: false, error: 'No CSRF token found on login page' };
 
-  const csrfToken = tokenMatch ? tokenMatch[1] : null;
+    // 2. POST credentials to the same /site/index endpoint
+    const post = await axios.post(`${BASE_URL}/site/index`,
+        new URLSearchParams({
+            '_csrf': csrf,
+            'UserForm[email]': email,
+            'UserForm[password]': password
+        }).toString(),
+        {
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Cookie': serialize(cookies),
+                'Referer': `${BASE_URL}/site/index`,
+                'Origin': BASE_URL,
+                'User-Agent': UA
+            },
+            maxRedirects: 0,          // we handle redirect manually
+            validateStatus: () => true
+        }
+    );
 
-  return { csrfToken, cookies };
-}
+    cookies = { ...cookies, ...parseCookies(post.headers) };
+    const location = post.headers['location'] || '';
 
-// STEP 2: login
-async function login() {
-  const { csrfToken, cookies } = await getLoginPage();
-const USERNAME = "nyaga.njogu23@students.dkut.ac.ke";
-const PASSWORD = "0711660741@Aa";
-  const res = await fetch("https://portal.dkut.ac.ke/login", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
-      "User-Agent": "Mozilla/5.0",
-      "Cookie": cookies,
-      "Referer": "https://portal.dkut.ac.ke/",
-    },
-    body: new URLSearchParams({
-      username: USERNAME,
-password: PASSWORD,
-      ...(csrfToken ? { _token: csrfToken } : {}),
-    }),
-    redirect: "manual", // important for capturing cookies
-  });
-
-  const newCookies = extractCookies(res.headers.get("set-cookie"));
-
-  if (!newCookies) throw new Error("Login failed");
-
-  return cookies + "; " + newCookies;
-}
-
-// STEP 3: ensure session
-async function getSessionCookie() {
-  const now = Date.now();
-
-  if (!session.cookie || now - session.lastLogin > 10 * 60 * 1000) {
-    session.cookie = await login();
-    session.lastLogin = now;
-  }
-
-  return session.cookie;
-}
-
-// MAIN HANDLER
-export default async function handler(req, res) {
-  try {
-    const { filename, type } = req.query;
-
-    if (!filename || !type) {
-      return res.status(400).send("Missing parameters");
+    if (post.status !== 302) {
+        return { success: false, error: `Login POST returned ${post.status}` };
+    }
+    if (location.includes('site/index') || location.includes('login')) {
+        return { success: false, error: 'Invalid credentials' };
     }
 
-    let cookie = await getSessionCookie();
+    // 3. Follow redirect to dashboard (establishes session)
+    const dashUrl = location.startsWith('http') ? location : `${BASE_URL}${location}`;
+    const dash = await axios.get(dashUrl, {
+        headers: { 'User-Agent': UA, 'Cookie': serialize(cookies), 'Referer': `${BASE_URL}/site/index` },
+        maxRedirects: 5,
+        validateStatus: () => true
+    });
+    cookies = { ...cookies, ...parseCookies(dash.headers) };
 
-    const url = `https://portal.dkut.ac.ke/student/downloadfeestructure?filename=${encodeURIComponent(
-      filename
-    )}&type=${encodeURIComponent(type)}`;
-
-    let response = await fetch(url, {
-      headers: {
-        "User-Agent": "Mozilla/5.0",
-        "Cookie": cookie,
-        "Referer": "https://portal.dkut.ac.ke/student/",
-      },
+    // 4. Warm‑up: visit the fees page (required for download permissions)
+    await axios.get(`${BASE_URL}/student/allfeestructure`, {
+        headers: { 'User-Agent': UA, 'Cookie': serialize(cookies), 'Referer': dashUrl },
+        maxRedirects: 5,
+        validateStatus: () => true
     });
 
-    // retry once if session expired mid-request
-    if (!response.ok) {
-      cookie = await login();
+    return { success: true, cookies };
+}
 
-      response = await fetch(url, {
+// ── Scrape all fee structure links from the portal ───────────────────────────
+async function scrapeFeeLinks(cookies) {
+    const res = await axios.get(`${BASE_URL}/student/allfeestructure`, {
         headers: {
-          "User-Agent": "Mozilla/5.0",
-          "Cookie": cookie,
+            'User-Agent': UA,
+            'Cookie': serialize(cookies),
+            'Referer': `${BASE_URL}/dashboard/index`
         },
-      });
+        maxRedirects: 5,
+        validateStatus: () => true
+    });
+
+    if (res.status !== 200) {
+        throw new Error(`Failed to fetch fees page: ${res.status}`);
     }
 
-    if (!response.ok) {
-      return res.status(response.status).send("Failed to fetch file");
-    }
+    const $ = cheerio.load(res.data);
+    const categories = {};
+    const urlMap = new Map();   // url -> { category, label }
 
-    const buffer = await response.arrayBuffer();
+    // The page uses <li><button>CATEGORY</button></li> followed by <ul> with <a> links
+    let currentCategory = null;
+    $('li').each((i, el) => {
+        const button = $(el).find('button.btn-danger');
+        if (button.length) {
+            currentCategory = button.text().trim();
+            return;
+        }
+        // Inside a <ul> that follows a category button
+        if (currentCategory) {
+            $(el).find('ul a').each((j, a) => {
+                const href = $(a).attr('href');
+                if (!href || !href.startsWith('/student/downloadfeestructure')) return;
+                const fullUrl = `${BASE_URL}${href}`;
+                const label = $(a).find('button').text().trim() || $(a).text().trim();
+                if (!categories[currentCategory]) categories[currentCategory] = [];
+                categories[currentCategory].push({
+                    label,
+                    downloadPath: `/api/fees?url=${encodeURIComponent(fullUrl)}`
+                });
+                urlMap.set(fullUrl, { category: currentCategory, label });
+            });
+            currentCategory = null; // reset after processing one <ul>
+        }
+    });
 
-    res.setHeader(
-      "Content-Type",
-      response.headers.get("content-type") || "application/pdf"
-    );
+    // Also catch any direct <a> inside <li> that might not follow the pattern
+    $('a[href*="/student/downloadfeestructure"]').each((i, a) => {
+        const href = $(a).attr('href');
+        if (!href) return;
+        const fullUrl = href.startsWith('http') ? href : `${BASE_URL}${href}`;
+        if (urlMap.has(fullUrl)) return;
+        const label = $(a).find('button').text().trim() || $(a).text().trim();
+        const category = 'OTHER';
+        if (!categories[category]) categories[category] = [];
+        categories[category].push({
+            label,
+            downloadPath: `/api/fees?url=${encodeURIComponent(fullUrl)}`
+        });
+        urlMap.set(fullUrl, { category, label });
+    });
 
-    res.setHeader(
-      "Content-Disposition",
-      `attachment; filename="${filename}.pdf"`
-    );
-
-    res.send(Buffer.from(buffer));
-  } catch (err) {
-    console.error("ERROR:", err);
-    res.status(500).send("Auto-login system failed");
-  }
+    return {
+        total: urlMap.size,
+        categories,
+        urlMap
+    };
 }
 
-    if (!response.ok) {
-      return res.status(response.status).send("Failed to fetch file");
+// ── Download proxy ────────────────────────────────────────────────────────────
+async function proxyDownload(cookies, targetUrl) {
+    const res = await axios.get(targetUrl, {
+        headers: {
+            'User-Agent': UA,
+            'Accept': 'application/pdf,application/octet-stream,*/*',
+            'Accept-Language': 'en-GB,en-US;q=0.9,en;q=0.8',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Cookie': serialize(cookies),
+            'Referer': `${BASE_URL}/student/allfeestructure`,
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'same-origin',
+            'Upgrade-Insecure-Requests': '1',
+        },
+        responseType: 'arraybuffer',
+        maxRedirects: 5,
+        validateStatus: () => true,
+    });
+    return {
+        status: res.status,
+        buffer: res.data,
+        contentType: res.headers['content-type'] || '',
+        disposition: res.headers['content-disposition'] || ''
+    };
+}
+
+// ── Vercel handler ───────────────────────────────────────────────────────────
+module.exports = async (req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    if (req.method === 'OPTIONS') return res.status(200).end();
+
+    // --- Refresh session and fee list if needed ---------------------------------
+    const now = Date.now();
+    let freshLogin = false;
+    if (!sessionCookies || now - sessionTimestamp > SESSION_TTL) {
+        const loginResult = await login(DKUT_EMAIL, DKUT_PASSWORD);
+        if (!loginResult.success) {
+            return res.status(401).json({ error: loginResult.error });
+        }
+        sessionCookies = loginResult.cookies;
+        sessionTimestamp = now;
+        freshLogin = true;
     }
 
-    const buffer = await response.arrayBuffer();
+    // --- If no fee list cached OR we just logged in, scrape fresh list ---------
+    if (!cachedFeeList || freshLogin) {
+        try {
+            cachedFeeList = await scrapeFeeLinks(sessionCookies);
+        } catch (err) {
+            // Session might be invalid – force re‑login on next request
+            sessionCookies = null;
+            return res.status(502).json({ error: `Failed to scrape fee links: ${err.message}`, retry: true });
+        }
+    }
 
-    res.setHeader(
-      "Content-Type",
-      response.headers.get("content-type") || "application/pdf"
-    );
+    // --- If no URL parameter → return the index of all fee files --------------
+    if (!req.query || !req.query.url) {
+        const { total, categories } = cachedFeeList;
+        return res.status(200).json({ total, categories });
+    }
 
-    res.setHeader(
-      "Content-Disposition",
-      `attachment; filename="${filename}.pdf"`
-    );
+    // --- Otherwise, proxy the requested PDF ------------------------------------
+    const targetUrl = req.query.url;
+    const allowedUrl = cachedFeeList.urlMap.has(targetUrl);
+    if (!allowedUrl || !targetUrl.startsWith(BASE_URL)) {
+        return res.status(400).json({ error: 'Unknown or disallowed download URL' });
+    }
 
-    res.send(Buffer.from(buffer));
+    try {
+        const file = await proxyDownload(sessionCookies, targetUrl);
+        if (file.status !== 200 || file.contentType.includes('text/html')) {
+            // Session likely expired – clear cache and ask client to retry
+            sessionCookies = null;
+            cachedFeeList = null;
+            const bodyText = Buffer.from(file.buffer).toString('utf8');
+            const $err = cheerio.load(bodyText);
+            return res.status(502).json({
+                error: $err('.alert-danger, .site-error').text().trim() || `Portal returned HTTP ${file.status}`,
+                retry: true
+            });
+        }
 
-  } catch (err) {
-    console.error(err);
-    res.status(500).send("Server error");
-  }
-}
+        const label = cachedFeeList.urlMap.get(targetUrl)?.label || 'fee-structure';
+        res.setHeader('Content-Type', file.contentType);
+        res.setHeader('Content-Disposition', file.disposition || `attachment; filename="${label.replace(/[^a-z0-9]/gi, '_')}.pdf"`);
+        if (file.buffer.byteLength) res.setHeader('Content-Length', file.buffer.byteLength);
+        return res.status(200).send(Buffer.from(file.buffer));
+    } catch (err) {
+        return res.status(500).json({ error: err.message });
+    }
+};
