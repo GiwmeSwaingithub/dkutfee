@@ -19,9 +19,5 @@
       "src": "/(.*)",
       "dest": "/public/$1"
     }
-  ],
-  "env": {
-    "DKUT_EMAIL": "@dkut_email",
-    "DKUT_PASSWORD": "@dkut_password"
-  }
+  ]
 }
