@@ -1,5 +1,6 @@
 const axios = require('axios');
 const cheerio = require('cheerio');
+const url = require('url');
 
 // ── CONFIGURATION (use environment variables in production) ─────────────────
 const DKUT_EMAIL    = process.env.DKUT_EMAIL    || 'nyaga.njogu23@students.dkut.ac.ke';
@@ -26,11 +27,9 @@ function serialize(map) {
     return Object.entries(map).map(([k, v]) => `${k}=${v}`).join('; ');
 }
 
-// ── Login (uses /site/index, the real login page) ───────────────────────────
+// ── Login (same as before) ───────────────────────────────────────────────────
 async function login(email, password) {
     let cookies = {};
-
-    // 1. GET the login page (homepage with form)
     const home = await axios.get(`${BASE_URL}/site/index`, {
         headers: { 'User-Agent': UA },
         maxRedirects: 5,
@@ -39,12 +38,10 @@ async function login(email, password) {
     cookies = { ...cookies, ...parseCookies(home.headers) };
 
     const $ = cheerio.load(home.data);
-    // CSRF token can be in meta tag or inside the form
     const csrf = $('meta[name="csrf-token"]').attr('content') ||
                  $('input[name="_csrf"]').val();
     if (!csrf) return { success: false, error: 'No CSRF token found on login page' };
 
-    // 2. POST credentials to the same /site/index endpoint
     const post = await axios.post(`${BASE_URL}/site/index`,
         new URLSearchParams({
             '_csrf': csrf,
@@ -59,7 +56,7 @@ async function login(email, password) {
                 'Origin': BASE_URL,
                 'User-Agent': UA
             },
-            maxRedirects: 0,          // we handle redirect manually
+            maxRedirects: 0,
             validateStatus: () => true
         }
     );
@@ -74,7 +71,6 @@ async function login(email, password) {
         return { success: false, error: 'Invalid credentials' };
     }
 
-    // 3. Follow redirect to dashboard (establishes session)
     const dashUrl = location.startsWith('http') ? location : `${BASE_URL}${location}`;
     const dash = await axios.get(dashUrl, {
         headers: { 'User-Agent': UA, 'Cookie': serialize(cookies), 'Referer': `${BASE_URL}/site/index` },
@@ -83,7 +79,7 @@ async function login(email, password) {
     });
     cookies = { ...cookies, ...parseCookies(dash.headers) };
 
-    // 4. Warm‑up: visit the fees page (required for download permissions)
+    // Warm‑up fees page (optional but harmless)
     await axios.get(`${BASE_URL}/student/allfeestructure`, {
         headers: { 'User-Agent': UA, 'Cookie': serialize(cookies), 'Referer': dashUrl },
         maxRedirects: 5,
@@ -93,7 +89,7 @@ async function login(email, password) {
     return { success: true, cookies };
 }
 
-// ── Scrape all fee structure links from the portal ───────────────────────────
+// ── Scrape fee links (unchanged) ─────────────────────────────────────────────
 async function scrapeFeeLinks(cookies) {
     const res = await axios.get(`${BASE_URL}/student/allfeestructure`, {
         headers: {
@@ -111,14 +107,12 @@ async function scrapeFeeLinks(cookies) {
     const categories = {};
     const urlMap = new Map();
 
-    // Find every <li> that contains a category button
     $('li').each((_, li) => {
         const $li = $(li);
         const $catButton = $li.find('button.btn-danger');
         if ($catButton.length === 0) return;
 
         const category = $catButton.text().trim();
-        // The next sibling element is a <ul> containing the download links
         const $ul = $li.next('ul');
         if ($ul.length === 0) return;
 
@@ -137,7 +131,6 @@ async function scrapeFeeLinks(cookies) {
         });
     });
 
-    // Also catch any orphaned links (just in case)
     $('a[href*="/student/downloadfeestructure"]').each((_, a) => {
         const href = $(a).attr('href');
         if (!href) return;
@@ -156,7 +149,7 @@ async function scrapeFeeLinks(cookies) {
     return { total: urlMap.size, categories, urlMap };
 }
 
-// ── Download proxy ────────────────────────────────────────────────────────────
+// ── Download proxy (unchanged) ────────────────────────────────────────────────
 async function proxyDownload(cookies, targetUrl) {
     const res = await axios.get(targetUrl, {
         headers: {
@@ -183,15 +176,72 @@ async function proxyDownload(cookies, targetUrl) {
     };
 }
 
-// ── Vercel handler ───────────────────────────────────────────────────────────
+// ── NEW: Scrape Lost & Found by registration number ──────────────────────────
+async function searchLostAndFound(cookies, regNumber) {
+    const searchUrl = `${BASE_URL}/lostandfound/index?LostAndFoundSearch%5Bstudent_reg%5D=${encodeURIComponent(regNumber)}`;
+    const res = await axios.get(searchUrl, {
+        headers: {
+            'User-Agent': UA,
+            'Cookie': serialize(cookies),
+            'Referer': `${BASE_URL}/lostandfound/index`
+        },
+        maxRedirects: 5,
+        validateStatus: () => true
+    });
+
+    if (res.status !== 200) {
+        throw new Error(`Portal returned ${res.status}`);
+    }
+
+    const $ = cheerio.load(res.data);
+    const items = [];
+
+    // The table with results has class "table table-striped table-bordered"
+    $('table.table tbody tr').each((_, row) => {
+        const $row = $(row);
+        // Skip filter row (it has input fields)
+        if ($row.find('input').length > 0) return;
+
+        const cells = $row.find('td');
+        if (cells.length < 8) return;
+
+        const id = cells.eq(1).text().trim();
+        const itemType = cells.eq(2).text().trim();
+        const itemName = cells.eq(3).text().trim();
+        const description = cells.eq(4).text().trim();
+        const studentReg = cells.eq(5).text().trim();
+        const dateUploaded = cells.eq(6).text().trim();
+
+        // Extract view link from the last cell
+        const viewLink = cells.eq(7).find('a[title="View"]').attr('href');
+        const fullViewUrl = viewLink ? `${BASE_URL}${viewLink}` : null;
+
+        items.push({
+            id,
+            itemType,
+            itemName,
+            description,
+            studentReg,
+            dateUploaded,
+            viewUrl: fullViewUrl
+        });
+    });
+
+    return { success: true, items, count: items.length };
+}
+
+// ── Main Vercel handler with routing ─────────────────────────────────────────
 module.exports = async (req, res) => {
-    // CORS headers
+    // CORS
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
     if (req.method === 'OPTIONS') return res.status(200).end();
 
-    // --- Refresh session and fee list if needed ---------------------------------
+    const parsedUrl = url.parse(req.url, true);
+    const pathname = parsedUrl.pathname;
+
+    // --- Ensure fresh session -------------------------------------------------
     const now = Date.now();
     let freshLogin = false;
     if (!sessionCookies || now - sessionTimestamp > SESSION_TTL) {
@@ -204,50 +254,69 @@ module.exports = async (req, res) => {
         freshLogin = true;
     }
 
-    // --- If no fee list cached OR we just logged in, scrape fresh list ---------
-    if (!cachedFeeList || freshLogin) {
+    // --- Route: Lost & Found search -------------------------------------------
+    if (pathname === '/api/lostandfound') {
+        const reg = parsedUrl.query.reg;
+        if (!reg) {
+            return res.status(400).json({ error: 'Missing registration number (reg parameter)' });
+        }
+
         try {
-            cachedFeeList = await scrapeFeeLinks(sessionCookies);
+            const result = await searchLostAndFound(sessionCookies, reg);
+            return res.status(200).json(result);
         } catch (err) {
-            // Session might be invalid – force re‑login on next request
+            // Session may be stale – force re‑login on next request
             sessionCookies = null;
-            return res.status(502).json({ error: `Failed to scrape fee links: ${err.message}`, retry: true });
+            return res.status(502).json({ error: `Search failed: ${err.message}`, retry: true });
         }
     }
 
-    // --- If no URL parameter → return the index of all fee files --------------
-    if (!req.query || !req.query.url) {
-        const { total, categories } = cachedFeeList;
-        return res.status(200).json({ total, categories });
-    }
-
-    // --- Otherwise, proxy the requested PDF ------------------------------------
-    const targetUrl = req.query.url;
-    const allowedUrl = cachedFeeList.urlMap.has(targetUrl);
-    if (!allowedUrl || !targetUrl.startsWith(BASE_URL)) {
-        return res.status(400).json({ error: 'Unknown or disallowed download URL' });
-    }
-
-    try {
-        const file = await proxyDownload(sessionCookies, targetUrl);
-        if (file.status !== 200 || file.contentType.includes('text/html')) {
-            // Session likely expired – clear cache and ask client to retry
-            sessionCookies = null;
-            cachedFeeList = null;
-            const bodyText = Buffer.from(file.buffer).toString('utf8');
-            const $err = cheerio.load(bodyText);
-            return res.status(502).json({
-                error: $err('.alert-danger, .site-error').text().trim() || `Portal returned HTTP ${file.status}`,
-                retry: true
-            });
+    // --- Route: Fees (existing) -----------------------------------------------
+    if (pathname === '/api/fees') {
+        // Refresh fee list if needed
+        if (!cachedFeeList || freshLogin) {
+            try {
+                cachedFeeList = await scrapeFeeLinks(sessionCookies);
+            } catch (err) {
+                sessionCookies = null;
+                return res.status(502).json({ error: `Failed to scrape fee links: ${err.message}`, retry: true });
+            }
         }
 
-        const label = cachedFeeList.urlMap.get(targetUrl)?.label || 'fee-structure';
-        res.setHeader('Content-Type', file.contentType);
-        res.setHeader('Content-Disposition', file.disposition || `attachment; filename="${label.replace(/[^a-z0-9]/gi, '_')}.pdf"`);
-        if (file.buffer.byteLength) res.setHeader('Content-Length', file.buffer.byteLength);
-        return res.status(200).send(Buffer.from(file.buffer));
-    } catch (err) {
-        return res.status(500).json({ error: err.message });
+        const targetUrl = parsedUrl.query.url;
+        if (!targetUrl) {
+            const { total, categories } = cachedFeeList;
+            return res.status(200).json({ total, categories });
+        }
+
+        const allowedUrl = cachedFeeList.urlMap.has(targetUrl);
+        if (!allowedUrl || !targetUrl.startsWith(BASE_URL)) {
+            return res.status(400).json({ error: 'Unknown or disallowed download URL' });
+        }
+
+        try {
+            const file = await proxyDownload(sessionCookies, targetUrl);
+            if (file.status !== 200 || file.contentType.includes('text/html')) {
+                sessionCookies = null;
+                cachedFeeList = null;
+                const bodyText = Buffer.from(file.buffer).toString('utf8');
+                const $err = cheerio.load(bodyText);
+                return res.status(502).json({
+                    error: $err('.alert-danger, .site-error').text().trim() || `Portal returned HTTP ${file.status}`,
+                    retry: true
+                });
+            }
+
+            const label = cachedFeeList.urlMap.get(targetUrl)?.label || 'fee-structure';
+            res.setHeader('Content-Type', file.contentType);
+            res.setHeader('Content-Disposition', file.disposition || `attachment; filename="${label.replace(/[^a-z0-9]/gi, '_')}.pdf"`);
+            if (file.buffer.byteLength) res.setHeader('Content-Length', file.buffer.byteLength);
+            return res.status(200).send(Buffer.from(file.buffer));
+        } catch (err) {
+            return res.status(500).json({ error: err.message });
+        }
     }
+
+    // --- Unknown route --------------------------------------------------------
+    res.status(404).json({ error: 'Endpoint not found' });
 };
