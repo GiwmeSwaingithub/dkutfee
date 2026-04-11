@@ -99,9 +99,7 @@ async function scrapeFeeLinks(cookies) {
             'User-Agent': UA,
             'Cookie': serialize(cookies),
             'Referer': `${BASE_URL}/dashboard/index`
-        },
-        maxRedirects: 5,
-        validateStatus: () => true
+        }
     });
 
     if (res.status !== 200) {
@@ -110,36 +108,36 @@ async function scrapeFeeLinks(cookies) {
 
     const $ = cheerio.load(res.data);
     const categories = {};
-    const urlMap = new Map();   // url -> { category, label }
+    const urlMap = new Map();
 
-    // The page uses <li><button>CATEGORY</button></li> followed by <ul> with <a> links
-    let currentCategory = null;
-    $('li').each((i, el) => {
-        const button = $(el).find('button.btn-danger');
-        if (button.length) {
-            currentCategory = button.text().trim();
-            return;
-        }
-        // Inside a <ul> that follows a category button
-        if (currentCategory) {
-            $(el).find('ul a').each((j, a) => {
-                const href = $(a).attr('href');
-                if (!href || !href.startsWith('/student/downloadfeestructure')) return;
-                const fullUrl = `${BASE_URL}${href}`;
-                const label = $(a).find('button').text().trim() || $(a).text().trim();
-                if (!categories[currentCategory]) categories[currentCategory] = [];
-                categories[currentCategory].push({
-                    label,
-                    downloadPath: `/api/fees?url=${encodeURIComponent(fullUrl)}`
-                });
-                urlMap.set(fullUrl, { category: currentCategory, label });
+    // Find every <li> that contains a category button
+    $('li').each((_, li) => {
+        const $li = $(li);
+        const $catButton = $li.find('button.btn-danger');
+        if ($catButton.length === 0) return;
+
+        const category = $catButton.text().trim();
+        // The next sibling element is a <ul> containing the download links
+        const $ul = $li.next('ul');
+        if ($ul.length === 0) return;
+
+        $ul.find('a').each((_, a) => {
+            const href = $(a).attr('href');
+            if (!href || !href.startsWith('/student/downloadfeestructure')) return;
+            const fullUrl = `${BASE_URL}${href}`;
+            const label = $(a).find('button').text().trim() || $(a).text().trim();
+
+            if (!categories[category]) categories[category] = [];
+            categories[category].push({
+                label,
+                downloadPath: `/api/fees?url=${encodeURIComponent(fullUrl)}`
             });
-            currentCategory = null; // reset after processing one <ul>
-        }
+            urlMap.set(fullUrl, { category, label });
+        });
     });
 
-    // Also catch any direct <a> inside <li> that might not follow the pattern
-    $('a[href*="/student/downloadfeestructure"]').each((i, a) => {
+    // Also catch any orphaned links (just in case)
+    $('a[href*="/student/downloadfeestructure"]').each((_, a) => {
         const href = $(a).attr('href');
         if (!href) return;
         const fullUrl = href.startsWith('http') ? href : `${BASE_URL}${href}`;
@@ -154,13 +152,8 @@ async function scrapeFeeLinks(cookies) {
         urlMap.set(fullUrl, { category, label });
     });
 
-    return {
-        total: urlMap.size,
-        categories,
-        urlMap
-    };
+    return { total: urlMap.size, categories, urlMap };
 }
-
 // ── Download proxy ────────────────────────────────────────────────────────────
 async function proxyDownload(cookies, targetUrl) {
     const res = await axios.get(targetUrl, {
