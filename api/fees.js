@@ -11,6 +11,14 @@ const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
 let sessionCookies   = null;
 let sessionTimestamp = 0;
 
+// All known fee structure download variants
+const FEE_DOWNLOADS = [
+    { filename: 'CERTIFICATE FEES STRUCTURES', type: 'CERTIFICATES' },
+    { filename: 'DIPLOMA FEES STRUCTURES',     type: 'DIPLOMA' },
+    { filename: 'DEGREE FEES STRUCTURES',      type: 'DEGREE' },
+    { filename: 'POSTGRADUATE FEES STRUCTURES',type: 'POSTGRADUATE' },
+];
+
 // ── Cookie helpers ────────────────────────────────────────────────────────────
 
 function parseCookies(headers) {
@@ -22,70 +30,44 @@ function parseCookies(headers) {
     });
     return map;
 }
-
 function merge(a, b) { return { ...a, ...b }; }
-
 function serialize(map) {
     return Object.entries(map).map(([k, v]) => `${k}=${v}`).join('; ');
 }
 
-// ── HTTP helpers ──────────────────────────────────────────────────────────────
-
-function get(url, cookieMap, extraHeaders = {}) {
-    return axios.get(url, {
-        headers: {
-            'User-Agent'                : UA,
-            'Accept'                    : 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language'           : 'en-GB,en-US;q=0.9,en;q=0.8',
-            'Connection'                : 'keep-alive',
-            'Upgrade-Insecure-Requests' : '1',
-            'Cookie'                    : serialize(cookieMap),
-            ...extraHeaders,
-        },
-        maxRedirects  : 10,
-        validateStatus: () => true,   // never throw on any HTTP status
-    });
-}
-
-// ── Login ─────────────────────────────────────────────────────────────────────
+// ── Login (same proven flow from logs) ───────────────────────────────────────
 
 async function login(email, password) {
     let cookies = {};
 
-    // Step 1 — load login page
     console.log('[1] GET /site/login');
-    const loginPage = await get(`${BASE_URL}/site/login`, cookies);
+    const loginPage = await axios.get(`${BASE_URL}/site/login`, {
+        headers: { 'User-Agent': UA },
+        maxRedirects: 5,
+        validateStatus: () => true,
+    });
     cookies = merge(cookies, parseCookies(loginPage.headers));
 
-    const $lp       = cheerio.load(loginPage.data);
-    const csrfToken =
-        $lp('meta[name="csrf-token"]').attr('content') ||
-        $lp('input[name="_csrf"]').val() || '';
+    const $      = cheerio.load(loginPage.data);
+    const csrf   = $('meta[name="csrf-token"]').attr('content') || $('input[name="_csrf"]').val() || '';
+    if (!csrf) return { success: false, error: 'No CSRF token on login page' };
 
-    console.log('[1] cookies:', JSON.stringify(cookies));
-    console.log('[1] csrf   :', csrfToken ? 'found' : 'MISSING');
-
-    if (!csrfToken) return { success: false, error: 'Could not find CSRF token on login page' };
-
-    // Step 2 — POST credentials (don't follow redirect)
     console.log('[2] POST /site/login');
     const postRes = await axios.post(
         `${BASE_URL}/site/login`,
         new URLSearchParams({
-            '_csrf'                 : csrfToken,
-            'LoginForm[username]'   : email,
-            'LoginForm[password]'   : password,
-            'LoginForm[rememberMe]' : '0',
+            '_csrf': csrf,
+            'LoginForm[username]'  : email,
+            'LoginForm[password]'  : password,
+            'LoginForm[rememberMe]': '0',
         }).toString(),
         {
             headers: {
-                'Content-Type'              : 'application/x-www-form-urlencoded',
-                'Cookie'                    : serialize(cookies),
-                'Referer'                   : `${BASE_URL}/site/login`,
-                'Origin'                    : BASE_URL,
-                'User-Agent'                : UA,
-                'Accept'                    : 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Upgrade-Insecure-Requests' : '1',
+                'Content-Type' : 'application/x-www-form-urlencoded',
+                'Cookie'       : serialize(cookies),
+                'Referer'      : `${BASE_URL}/site/login`,
+                'Origin'       : BASE_URL,
+                'User-Agent'   : UA,
             },
             maxRedirects  : 0,
             validateStatus: () => true,
@@ -94,145 +76,57 @@ async function login(email, password) {
 
     cookies = merge(cookies, parseCookies(postRes.headers));
     const location = postRes.headers['location'] || '';
-    console.log('[2] status  :', postRes.status, '→', location);
+    console.log('[2] status:', postRes.status, '→', location);
 
-    if (postRes.status !== 302) {
-        const $e = cheerio.load(postRes.data);
-        return { success: false, error: $e('.alert,.help-block,.error-summary').text().trim() || `Login returned ${postRes.status}` };
-    }
-    if (location.includes('login')) {
-        return { success: false, error: 'Credentials rejected — redirected back to login' };
-    }
+    if (postRes.status !== 302)        return { success: false, error: `Login POST returned ${postRes.status}` };
+    if (location.includes('login'))    return { success: false, error: 'Wrong credentials' };
 
-    // Step 3 — follow redirect to establish session
+    // Follow redirect to fully establish session
     const followUrl = location.startsWith('http') ? location : `${BASE_URL}${location}`;
     console.log('[3] GET', followUrl);
-    const dashRes = await get(followUrl, cookies, { 'Referer': `${BASE_URL}/site/login` });
+    const dashRes = await axios.get(followUrl, {
+        headers: { 'Cookie': serialize(cookies), 'User-Agent': UA, 'Referer': `${BASE_URL}/site/login` },
+        maxRedirects: 5,
+        validateStatus: () => true,
+    });
     cookies = merge(cookies, parseCookies(dashRes.headers));
-    console.log('[3] status  :', dashRes.status);
+    console.log('[3] status:', dashRes.status);
 
     return { success: true, cookies };
 }
 
-// ── Parse any page for fee data ───────────────────────────────────────────────
+// ── Download a fee file and return as buffer ──────────────────────────────────
 
-function parseFees(html, sourceUrl) {
-    const $ = cheerio.load(html);
-    const data = [];
+async function downloadFeeFile(cookies, filename, type) {
+    const url = `${BASE_URL}/student/downloadfeestructure?` +
+        new URLSearchParams({ filename, type }).toString();
 
-    // Strategy 1: <table> rows
-    $('table').each((_, table) => {
-        const headers = [];
-        $(table).find('thead th, thead td').each((_, th) => headers.push($(th).text().trim()));
+    console.log('[download] GET', url);
 
-        $(table).find('tbody tr').each((_, row) => {
-            const cells = $(row).find('td');
-            if (!cells.length) return;
-            const vals = [];
-            cells.each((_, td) => vals.push($(td).text().trim()));
-            if (vals.some(v => v)) {
-                data.push({
-                    category   : vals[0] || '—',
-                    amount     : vals[1] || '—',
-                    description: vals[2] || '',
-                });
-            }
-        });
-
-        // table with no thead — treat first row as header, rest as data
-        if (!headers.length) {
-            $(table).find('tr').each((i, row) => {
-                if (i === 0) return;
-                const cells = $(row).find('td');
-                const vals  = [];
-                cells.each((_, td) => vals.push($(td).text().trim()));
-                if (vals.some(v => v)) {
-                    data.push({ category: vals[0] || '—', amount: vals[1] || '—', description: vals[2] || '' });
-                }
-            });
-        }
+    const res = await axios.get(url, {
+        headers: {
+            'Cookie'                    : serialize(cookies),
+            'User-Agent'                : UA,
+            'Referer'                   : `${BASE_URL}/student/feestatement`,
+            'Accept'                    : 'application/pdf,application/octet-stream,*/*',
+            'Upgrade-Insecure-Requests' : '1',
+        },
+        responseType  : 'arraybuffer',   // handle binary (PDF/Excel)
+        maxRedirects  : 5,
+        validateStatus: () => true,
     });
 
-    // Strategy 2: Bootstrap panels / cards
-    if (!data.length) {
-        $('.panel, .card, .fee-item, .list-group-item').each((_, el) => {
-            const cat = $(el).find('h3,h4,strong,.category,.title').first().text().trim();
-            const amt = $(el).find('.amount,.price,.fee,.value').first().text().trim();
-            if (cat) data.push({ category: cat, amount: amt || 'N/A', description: '' });
-        });
-    }
+    console.log('[download] status:', res.status,
+        '| content-type:', res.headers['content-type'],
+        '| content-length:', res.headers['content-length']);
 
-    // Strategy 3: definition lists
-    if (!data.length) {
-        $('dl').each((_, dl) => {
-            $(dl).find('dt').each((i, dt) => {
-                const dd = $(dl).find('dd').eq(i);
-                data.push({ category: $(dt).text().trim(), amount: dd.text().trim(), description: '' });
-            });
-        });
-    }
-
-    const result = { lastUpdated: new Date().toISOString(), source: sourceUrl, data };
-
-    if (!data.length) {
-        result.note       = 'No fee rows parsed — review debug fields';
-        result.debug_text = $('body').text().replace(/\s+/g, ' ').slice(0, 1500).trim();
-        result.debug_html = $('#content,main,.container,.wrapper').first().html()?.slice(0, 3000)
-                         || $('body').html()?.slice(0, 3000);
-    }
-
-    return result;
-}
-
-// ── Main flow ─────────────────────────────────────────────────────────────────
-
-async function run(email, password) {
-    const loginResult = await login(email, password);
-    if (!loginResult.success) return { success: false, error: loginResult.error };
-
-    const cookies = loginResult.cookies;
-
-    // Try the three fee-related URLs in order of likelihood
-    const targets = [
-        { url: `${BASE_URL}/student/feestatement`,    referer: `${BASE_URL}/site/index` },
-        { url: `${BASE_URL}/student/allfeestructure`, referer: `${BASE_URL}/student/feestatement` },
-        { url: `${BASE_URL}/student/fees`,            referer: `${BASE_URL}/site/index` },
-    ];
-
-    const errors = [];
-
-    for (const { url, referer } of targets) {
-        console.log('[scrape] GET', url);
-        const res = await get(url, cookies, { Referer: referer });
-        console.log('[scrape] status:', res.status, 'url:', url);
-
-        // Bounced to login
-        const finalUrl = res.request?.res?.responseUrl || url;
-        if (finalUrl.includes('login') || res.status === 401) {
-            errors.push(`${url} → session expired`);
-            continue;
-        }
-
-        if (res.status >= 400) {
-            errors.push(`${url} → HTTP ${res.status}`);
-            continue;
-        }
-
-        // Successfully got a page — parse it
-        const parsed = parseFees(res.data, url);
-
-        // If we got real data, return immediately
-        if (parsed.data.length > 0) {
-            return { success: true, data: parsed };
-        }
-
-        // Page loaded but no table found — still return it with debug info
-        // so the developer can see what's on the page
-        errors.push(`${url} → 200 but no rows parsed`);
-        return { success: true, data: parsed };   // return debug info
-    }
-
-    return { success: false, error: 'All fee URLs failed: ' + errors.join(' | ') };
+    return {
+        status     : res.status,
+        buffer     : res.data,
+        contentType: res.headers['content-type'] || 'application/octet-stream',
+        disposition: res.headers['content-disposition'] || '',
+        finalUrl   : res.request?.res?.responseUrl || url,
+    };
 }
 
 // ── Vercel handler ────────────────────────────────────────────────────────────
@@ -243,38 +137,55 @@ module.exports = async (req, res) => {
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
     if (req.method === 'OPTIONS') return res.status(200).end();
 
+    // ?type=CERTIFICATES (optional) — defaults to CERTIFICATES
+    const requestedType = (req.query?.type || 'CERTIFICATES').toUpperCase();
+    const target = FEE_DOWNLOADS.find(f => f.type === requestedType) || FEE_DOWNLOADS[0];
+
     try {
         const now = Date.now();
-        const needsLogin = !sessionCookies || (now - sessionTimestamp > SESSION_TTL);
 
-        if (needsLogin) {
-            console.log('[handler] full login + scrape');
-            const r = await run(DKUT_EMAIL, DKUT_PASSWORD);
-            if (!r.success) return res.status(401).json({ error: r.error });
-            sessionCookies   = r.data.cookies || null;
+        // Login if needed
+        if (!sessionCookies || now - sessionTimestamp > SESSION_TTL) {
+            console.log('[handler] logging in...');
+            const loginResult = await login(DKUT_EMAIL, DKUT_PASSWORD);
+            if (!loginResult.success) {
+                return res.status(401).json({ error: 'Login failed: ' + loginResult.error });
+            }
+            sessionCookies   = loginResult.cookies;
             sessionTimestamp = now;
-            return res.status(200).json(r.data);
         }
 
-        // Reuse session — scrape feestatement first (known to return 200)
-        console.log('[handler] reusing session');
-        const feeRes = await get(
-            `${BASE_URL}/student/feestatement`,
-            sessionCookies,
-            { Referer: `${BASE_URL}/site/index` }
-        );
+        const file = await downloadFeeFile(sessionCookies, target.filename, target.type);
 
-        const finalUrl = feeRes.request?.res?.responseUrl || '';
-        if (finalUrl.includes('login')) {
+        // If bounced to login page — session expired
+        if (file.finalUrl.includes('login') || file.status === 401) {
             sessionCookies = null;
-            return res.status(401).json({ error: 'Session expired — call again to re-login' });
+            return res.status(401).json({ error: 'Session expired, retry' });
         }
 
-        const parsed = parseFees(feeRes.data, `${BASE_URL}/student/feestatement`);
-        return res.status(200).json(parsed);
+        // Portal returned an error page instead of a file
+        if (file.status >= 400 || file.contentType.includes('text/html')) {
+            // Convert buffer to text to show debug info
+            const text = Buffer.from(file.buffer).toString('utf8').replace(/\s+/g, ' ').slice(0, 800);
+            return res.status(502).json({
+                error      : `Portal returned ${file.status} with HTML instead of a file`,
+                debug_text : text,
+                tried_url  : `${BASE_URL}/student/downloadfeestructure?filename=${encodeURIComponent(target.filename)}&type=${target.type}`,
+            });
+        }
+
+        // ✅ Got a real file — stream it directly to the browser
+        res.setHeader('Content-Type', file.contentType);
+        res.setHeader('Content-Disposition',
+            file.disposition || `attachment; filename="${target.filename}.pdf"`);
+        if (file.buffer.byteLength) {
+            res.setHeader('Content-Length', file.buffer.byteLength);
+        }
+
+        return res.status(200).send(Buffer.from(file.buffer));
 
     } catch (err) {
-        console.error('[handler] unhandled error:', err.message);
-        return res.status(500).json({ error: 'Internal error: ' + err.message });
+        console.error('[handler] error:', err.message);
+        return res.status(500).json({ error: err.message });
     }
 };
