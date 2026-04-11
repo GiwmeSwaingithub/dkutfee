@@ -1,127 +1,41 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>DKUT Fee Structure | Student Resources</title>
-    <link rel="stylesheet" href="styles.css">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DKUT Fee Structures</title>
+  <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-    <!-- Header -->
-    <header class="header">
-        <div class="container">
-            <div class="header-content">
-                <div class="logo">
-                    <svg width="40" height="40" viewBox="0 0 40 40" fill="none">
-                        <rect width="40" height="40" rx="8" fill="#2563eb"/>
-                        <path d="M12 20h16M12 14h16M12 26h10" stroke="white" stroke-width="2" stroke-linecap="round"/>
-                    </svg>
-                    <h1>DKUT Resources</h1>
-                </div>
-                <nav>
-                    <a href="#fees" class="nav-link active">Fee Structure</a>
-                    <a href="#about" class="nav-link">About</a>
-                </nav>
-            </div>
+  <header>
+    <div class="header-inner">
+      <div class="brand">
+        <svg width="36" height="36" viewBox="0 0 36 36" fill="none"><rect width="36" height="36" rx="8" fill="#1a6b3c"/><path d="M10 18h16M10 12h16M10 24h10" stroke="#fff" stroke-width="2.2" stroke-linecap="round"/></svg>
+        <div>
+          <h1>DKUT Fee Structures</h1>
+          <span>Dedan Kimathi University of Technology</span>
         </div>
-    </header>
+      </div>
+      <div class="search-wrap">
+        <input id="search" type="text" placeholder="Search programme or category…" autocomplete="off">
+      </div>
+    </div>
+  </header>
 
-    <!-- Hero Section -->
-    <section class="hero">
-        <div class="container">
-            <h2 class="hero-title">Fee Structure Information</h2>
-            <p class="hero-subtitle">Quick access to DKUT fee details for all programs</p>
-        </div>
-    </section>
+  <main>
+    <div id="status" class="status loading">
+      <div class="spinner"></div>
+      <p>Loading fee structures…</p>
+    </div>
+    <div id="content" class="hidden"></div>
+  </main>
 
-    <!-- Main Content -->
-    <main class="main-content">
-        <div class="container">
-            <!-- Loading State -->
-            <div id="loadingState" class="loading-card">
-                <div class="spinner"></div>
-                <p>Loading fee structure...</p>
-            </div>
+  <footer>
+    <p>⚠️ Unofficial resource. Always verify with the official <a href="https://portal.dkut.ac.ke" target="_blank">DKUT portal</a>.</p>
+  </footer>
 
-            <!-- Error State -->
-            <div id="errorState" class="error-card" style="display: none;">
-                <div class="error-icon">⚠️</div>
-                <h3>Unable to Load Data</h3>
-                <p id="errorMessage">Something went wrong. Please try again.</p>
-                <button onclick="loadFees()" class="btn btn-primary">Retry</button>
-            </div>
+  <div id="toast" class="toast hidden"></div>
 
-            <!-- Content State -->
-            <div id="contentState" style="display: none;">
-                <!-- Stats Cards -->
-                <div class="stats-grid">
-                    <div class="stat-card">
-                        <div class="stat-icon">📊</div>
-                        <div class="stat-content">
-                            <p class="stat-label">Total Categories</p>
-                            <p class="stat-value" id="totalCategories">0</p>
-                        </div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-icon">🕐</div>
-                        <div class="stat-content">
-                            <p class="stat-label">Last Updated</p>
-                            <p class="stat-value" id="lastUpdated">Just now</p>
-                        </div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-icon">💰</div>
-                        <div class="stat-content">
-                            <p class="stat-label">Currency</p>
-                            <p class="stat-value">KES</p>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Search Bar -->
-                <div class="search-container">
-                    <input 
-                        type="text" 
-                        id="searchInput" 
-                        class="search-input" 
-                        placeholder="Search by category or amount..."
-                        onkeyup="filterFees()"
-                    >
-                    <span class="search-icon">🔍</span>
-                </div>
-
-                <!-- Fee Table -->
-                <div class="table-card">
-                    <table class="fee-table">
-                        <thead>
-                            <tr>
-                                <th>Category</th>
-                                <th>Amount (KES)</th>
-                                <th>Description</th>
-                            </tr>
-                        </thead>
-                        <tbody id="feeTableBody">
-                            <!-- Populated by JavaScript -->
-                        </tbody>
-                    </table>
-                </div>
-
-                <!-- Empty State -->
-                <div id="emptyState" class="empty-state" style="display: none;">
-                    <p>No fees found matching your search</p>
-                </div>
-            </div>
-        </div>
-    </main>
-
-    <!-- Footer -->
-    <footer class="footer">
-        <div class="container">
-            <p>⚠️ <strong>Disclaimer:</strong> This is an unofficial resource. Always verify fees with the official DKUT portal.</p>
-            <p>Data sourced from <a href="https://portal.dkut.ac.ke" target="_blank">portal.dkut.ac.ke</a></p>
-        </div>
-    </footer>
-
-    <script src="script.js"></script>
+  <script src="script.js"></script>
 </body>
 </html>
