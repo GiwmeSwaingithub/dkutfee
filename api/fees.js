@@ -6,18 +6,10 @@ const DKUT_PASSWORD = process.env.DKUT_PASSWORD || '0711660741@Aa';
 
 const BASE_URL    = 'https://portal.dkut.ac.ke';
 const SESSION_TTL = 30 * 60 * 1000;
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36';
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36 OPR/129.0.0.0';
 
 let sessionCookies   = null;
 let sessionTimestamp = 0;
-
-// All known fee structure download variants
-const FEE_DOWNLOADS = [
-    { filename: 'CERTIFICATE FEES STRUCTURES', type: 'CERTIFICATES' },
-    { filename: 'DIPLOMA FEES STRUCTURES',     type: 'DIPLOMA' },
-    { filename: 'DEGREE FEES STRUCTURES',      type: 'DEGREE' },
-    { filename: 'POSTGRADUATE FEES STRUCTURES',type: 'POSTGRADUATE' },
-];
 
 // ── Cookie helpers ────────────────────────────────────────────────────────────
 
@@ -35,12 +27,28 @@ function serialize(map) {
     return Object.entries(map).map(([k, v]) => `${k}=${v}`).join('; ');
 }
 
-// ── Login (same proven flow from logs) ───────────────────────────────────────
+function commonHeaders(cookies, referer) {
+    return {
+        'User-Agent'                : UA,
+        'Accept'                    : 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'Accept-Language'           : 'en-GB,en-US;q=0.9,en;q=0.8',
+        'Accept-Encoding'           : 'gzip, deflate, br',
+        'Connection'                : 'keep-alive',
+        'Upgrade-Insecure-Requests' : '1',
+        'Sec-Fetch-Dest'            : 'document',
+        'Sec-Fetch-Mode'            : 'navigate',
+        'Sec-Fetch-Site'            : 'same-origin',
+        'Cookie'                    : serialize(cookies),
+        ...(referer ? { 'Referer': referer } : {}),
+    };
+}
+
+// ── Login ─────────────────────────────────────────────────────────────────────
 
 async function login(email, password) {
     let cookies = {};
 
-    console.log('[1] GET /site/login');
+    // 1. Load login page
     const loginPage = await axios.get(`${BASE_URL}/site/login`, {
         headers: { 'User-Agent': UA },
         maxRedirects: 5,
@@ -48,18 +56,19 @@ async function login(email, password) {
     });
     cookies = merge(cookies, parseCookies(loginPage.headers));
 
-    const $      = cheerio.load(loginPage.data);
-    const csrf   = $('meta[name="csrf-token"]').attr('content') || $('input[name="_csrf"]').val() || '';
+    const $    = cheerio.load(loginPage.data);
+    const csrf = $('meta[name="csrf-token"]').attr('content') || $('input[name="_csrf"]').val() || '';
     if (!csrf) return { success: false, error: 'No CSRF token on login page' };
+    console.log('[login] csrf:', csrf.slice(0, 20) + '...');
 
-    console.log('[2] POST /site/login');
+    // 2. POST credentials
     const postRes = await axios.post(
         `${BASE_URL}/site/login`,
         new URLSearchParams({
-            '_csrf': csrf,
-            'LoginForm[username]'  : email,
-            'LoginForm[password]'  : password,
-            'LoginForm[rememberMe]': '0',
+            '_csrf'                 : csrf,
+            'LoginForm[username]'   : email,
+            'LoginForm[password]'   : password,
+            'LoginForm[rememberMe]' : '0',
         }).toString(),
         {
             headers: {
@@ -68,6 +77,8 @@ async function login(email, password) {
                 'Referer'      : `${BASE_URL}/site/login`,
                 'Origin'       : BASE_URL,
                 'User-Agent'   : UA,
+                'Sec-Fetch-Site': 'same-origin',
+                'Sec-Fetch-Mode': 'navigate',
             },
             maxRedirects  : 0,
             validateStatus: () => true,
@@ -76,58 +87,74 @@ async function login(email, password) {
 
     cookies = merge(cookies, parseCookies(postRes.headers));
     const location = postRes.headers['location'] || '';
-    console.log('[2] status:', postRes.status, '→', location);
+    console.log('[login] POST', postRes.status, '→', location);
 
-    if (postRes.status !== 302)        return { success: false, error: `Login POST returned ${postRes.status}` };
-    if (location.includes('login'))    return { success: false, error: 'Wrong credentials' };
+    if (postRes.status !== 302)     return { success: false, error: `Login POST returned ${postRes.status}` };
+    if (location.includes('login')) return { success: false, error: 'Wrong credentials' };
 
-    // Follow redirect to fully establish session
+    // 3. Follow redirect to dashboard
     const followUrl = location.startsWith('http') ? location : `${BASE_URL}${location}`;
-    console.log('[3] GET', followUrl);
     const dashRes = await axios.get(followUrl, {
-        headers: { 'Cookie': serialize(cookies), 'User-Agent': UA, 'Referer': `${BASE_URL}/site/login` },
+        headers: commonHeaders(cookies, `${BASE_URL}/site/login`),
         maxRedirects: 5,
         validateStatus: () => true,
     });
     cookies = merge(cookies, parseCookies(dashRes.headers));
-    console.log('[3] status:', dashRes.status);
+    console.log('[login] dashboard', dashRes.status);
+
+    // 4. Visit feestatement — warms up session state for fee endpoints
+    const feeStmt = await axios.get(`${BASE_URL}/student/feestatement`, {
+        headers: commonHeaders(cookies, followUrl),
+        maxRedirects: 5,
+        validateStatus: () => true,
+    });
+    cookies = merge(cookies, parseCookies(feeStmt.headers));
+    console.log('[login] feestatement', feeStmt.status);
 
     return { success: true, cookies };
 }
 
-// ── Download a fee file and return as buffer ──────────────────────────────────
+// ── Download fee structure file ───────────────────────────────────────────────
 
-async function downloadFeeFile(cookies, filename, type) {
-    const url = `${BASE_URL}/student/downloadfeestructure?` +
-        new URLSearchParams({ filename, type }).toString();
-
-    console.log('[download] GET', url);
+async function downloadFee(cookies, filename, type) {
+    // Use exact format the browser uses: spaces as + (not %20)
+    const qs  = `filename=${filename.replace(/ /g, '+')}&type=${type}`;
+    const url = `${BASE_URL}/student/downloadfeestructure?${qs}`;
+    console.log('[download]', url);
 
     const res = await axios.get(url, {
         headers: {
-            'Cookie'                    : serialize(cookies),
-            'User-Agent'                : UA,
-            'Referer'                   : `${BASE_URL}/student/feestatement`,
-            'Accept'                    : 'application/pdf,application/octet-stream,*/*',
-            'Upgrade-Insecure-Requests' : '1',
+            ...commonHeaders(cookies, `${BASE_URL}/student/feestatement`),
+            'Accept'        : 'application/pdf,application/octet-stream,*/*',
+            'Sec-Fetch-Dest': 'document',
         },
-        responseType  : 'arraybuffer',   // handle binary (PDF/Excel)
+        responseType  : 'arraybuffer',
         maxRedirects  : 5,
         validateStatus: () => true,
     });
 
-    console.log('[download] status:', res.status,
-        '| content-type:', res.headers['content-type'],
-        '| content-length:', res.headers['content-length']);
+    const ct  = res.headers['content-type'] || '';
+    const len = res.headers['content-length'] || res.data?.byteLength || 0;
+    console.log('[download] status:', res.status, '| ct:', ct, '| len:', len);
 
     return {
         status     : res.status,
         buffer     : res.data,
-        contentType: res.headers['content-type'] || 'application/octet-stream',
+        contentType: ct,
         disposition: res.headers['content-disposition'] || '',
         finalUrl   : res.request?.res?.responseUrl || url,
+        url,
     };
 }
+
+// ── Fee type map ──────────────────────────────────────────────────────────────
+
+const FEE_TYPES = {
+    'CERTIFICATES' : 'CERTIFICATE FEES STRUCTURES',
+    'DIPLOMA'      : 'DIPLOMA FEES STRUCTURES',
+    'DEGREE'       : 'DEGREE FEES STRUCTURES',
+    'POSTGRADUATE' : 'POSTGRADUATE FEES STRUCTURES',
+};
 
 // ── Vercel handler ────────────────────────────────────────────────────────────
 
@@ -137,55 +164,59 @@ module.exports = async (req, res) => {
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
     if (req.method === 'OPTIONS') return res.status(200).end();
 
-    // ?type=CERTIFICATES (optional) — defaults to CERTIFICATES
-    const requestedType = (req.query?.type || 'CERTIFICATES').toUpperCase();
-    const target = FEE_DOWNLOADS.find(f => f.type === requestedType) || FEE_DOWNLOADS[0];
+    const type     = ((req.query && req.query.type) || 'CERTIFICATES').toUpperCase();
+    const filename = FEE_TYPES[type] || FEE_TYPES['CERTIFICATES'];
 
     try {
         const now = Date.now();
 
-        // Login if needed
+        // Re-login if session stale
         if (!sessionCookies || now - sessionTimestamp > SESSION_TTL) {
-            console.log('[handler] logging in...');
-            const loginResult = await login(DKUT_EMAIL, DKUT_PASSWORD);
-            if (!loginResult.success) {
-                return res.status(401).json({ error: 'Login failed: ' + loginResult.error });
-            }
-            sessionCookies   = loginResult.cookies;
+            const r = await login(DKUT_EMAIL, DKUT_PASSWORD);
+            if (!r.success) return res.status(401).json({ error: 'Login failed: ' + r.error });
+            sessionCookies   = r.cookies;
             sessionTimestamp = now;
         }
 
-        const file = await downloadFeeFile(sessionCookies, target.filename, target.type);
+        const file = await downloadFee(sessionCookies, filename, type);
 
-        // If bounced to login page — session expired
+        // Bounced to login → session dead
         if (file.finalUrl.includes('login') || file.status === 401) {
             sessionCookies = null;
-            return res.status(401).json({ error: 'Session expired, retry' });
+            return res.status(401).json({ error: 'Session expired — retry' });
         }
 
-        // Portal returned an error page instead of a file
-        if (file.status >= 400 || file.contentType.includes('text/html')) {
-            // Convert buffer to text to show debug info
-            const text = Buffer.from(file.buffer).toString('utf8').replace(/\s+/g, ' ').slice(0, 800);
+        // Got HTML (error page) instead of a file
+        if (file.status !== 200 || file.contentType.includes('text/html')) {
+            const bodyText = Buffer.from(file.buffer).toString('utf8');
+            const $        = cheerio.load(bodyText);
+
+            // Extract the actual Yii2 error message
+            const yiiError = $('.alert-danger, .site-error h1, #error-message').text().trim()
+                          || $('h1').first().text().trim()
+                          || 'Unknown portal error';
+
             return res.status(502).json({
-                error      : `Portal returned ${file.status} with HTML instead of a file`,
-                debug_text : text,
-                tried_url  : `${BASE_URL}/student/downloadfeestructure?filename=${encodeURIComponent(target.filename)}&type=${target.type}`,
+                error      : `Portal error on download: "${yiiError}"`,
+                http_status: file.status,
+                tried_url  : file.url,
+                hint       : 'This student account may not have a fee structure assigned, or the portal requires a specific student ID in the URL. Try visiting the portal manually to confirm the download works for this account.',
+                // Full body so we can inspect it
+                debug_html : bodyText.slice(0, 2000),
             });
         }
 
-        // ✅ Got a real file — stream it directly to the browser
+        // ✅ Real file — pipe it to the browser
         res.setHeader('Content-Type', file.contentType);
         res.setHeader('Content-Disposition',
-            file.disposition || `attachment; filename="${target.filename}.pdf"`);
+            file.disposition || `attachment; filename="${filename}.pdf"`);
         if (file.buffer.byteLength) {
             res.setHeader('Content-Length', file.buffer.byteLength);
         }
-
         return res.status(200).send(Buffer.from(file.buffer));
 
     } catch (err) {
-        console.error('[handler] error:', err.message);
+        console.error('[handler]', err.message);
         return res.status(500).json({ error: err.message });
     }
 };
