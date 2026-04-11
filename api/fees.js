@@ -1,6 +1,7 @@
 const axios = require('axios');
 const cheerio = require('cheerio');
 
+// ── CONFIGURATION (use environment variables in production) ─────────────────
 const DKUT_EMAIL    = process.env.DKUT_EMAIL    || 'nyaga.njogu23@students.dkut.ac.ke';
 const DKUT_PASSWORD = process.env.DKUT_PASSWORD || '0711660741@Aa';
 const BASE_URL      = 'https://portal.dkut.ac.ke';
@@ -154,6 +155,7 @@ async function scrapeFeeLinks(cookies) {
 
     return { total: urlMap.size, categories, urlMap };
 }
+
 // ── Download proxy ────────────────────────────────────────────────────────────
 async function proxyDownload(cookies, targetUrl) {
     const res = await axios.get(targetUrl, {
@@ -183,6 +185,7 @@ async function proxyDownload(cookies, targetUrl) {
 
 // ── Vercel handler ───────────────────────────────────────────────────────────
 module.exports = async (req, res) => {
+    // CORS headers
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
