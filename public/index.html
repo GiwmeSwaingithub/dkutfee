@@ -4,23 +4,38 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>DKUT Fee Structures</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
   <header>
     <div class="header-inner">
       <div class="brand">
-        <svg width="36" height="36" viewBox="0 0 36 36" fill="none">
-          <rect width="36" height="36" rx="8" fill="#1a6b3c"/>
-          <path d="M10 18h16M10 12h16M10 24h10" stroke="#fff" stroke-width="2.2" stroke-linecap="round"/>
-        </svg>
+        <div class="brand-logo">
+          <svg width="22" height="22" viewBox="0 0 36 36" fill="none">
+            <path d="M10 18h16M10 12h16M10 24h10" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/>
+          </svg>
+        </div>
         <div>
           <h1>DKUT Fee Structures</h1>
           <span>Dedan Kimathi University of Technology</span>
         </div>
       </div>
-      <div class="search-wrap">
-        <input id="search" type="text" placeholder="Search programme or category…" autocomplete="off">
+      <div class="header-right">
+        <div class="search-wrap">
+          <svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round">
+            <circle cx="6.5" cy="6.5" r="5"/><path d="M10.5 10.5l3 3"/>
+          </svg>
+          <input id="search" type="search" placeholder="Search programme or category…" autocomplete="off" spellcheck="false">
+        </div>
+        <button id="refreshBtn" title="Refresh data">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="23 4 23 10 17 10"/>
+            <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+          </svg>
+          <span>Refresh</span>
+        </button>
       </div>
     </div>
   </header>
@@ -34,7 +49,7 @@
   </main>
 
   <footer>
-    <p>⚠️ Unofficial resource. Always verify with the official <a href="https://portal.dkut.ac.ke" target="_blank">DKUT portal</a>.</p>
+    <p>⚠️ Unofficial resource. Always verify with the official <a href="https://portal.dkut.ac.ke" target="_blank" rel="noopener">DKUT portal</a>.</p>
   </footer>
 
   <div id="toast" class="toast hidden"></div>
